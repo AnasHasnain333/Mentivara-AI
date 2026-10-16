@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 
 import streamlit as st
@@ -10,8 +11,16 @@ from utils.ui import page_header, note, status_pill, release_camera_resources
 # Set the environment variable FORCE_CLOUD=1 to test the online view on your own computer.
 ON_CLOUD = os.path.exists("/mount/src") or os.environ.get("FORCE_CLOUD") == "1"
 
+# Browser-based live video (works online). Needs `streamlit-webrtc` in requirements313.txt.
+try:
+    import av
+    from streamlit_webrtc import VideoProcessorBase, WebRtcMode, webrtc_streamer
+    WEBRTC_OK, WEBRTC_ERR = True, ""
+except Exception as _exc:  # pragma: no cover
+    WEBRTC_OK, WEBRTC_ERR = False, str(_exc)
+
 page_header("📷 Camera-Based Wellness Interaction",
-            "Face detection with OpenCV and MediaPipe")
+            "Live face detection with OpenCV and MediaPipe")
 note(
     "<b>This is a computer vision demonstration, not a clinical assessment.</b> "
     "It only finds faces and draws boxes and landmarks. It does not recognise people, read emotions, "
@@ -50,6 +59,8 @@ if not cv_utils.CV2_AVAILABLE:
 with st.expander("System check", expanded=False):
     for name, ok, detail in cv_utils.environment_report():
         st.markdown(f"{'✅' if ok else '⚠️'} **{name}**: `{detail}`")
+    st.markdown(f"{'✅' if WEBRTC_OK else '⚠️'} **streamlit-webrtc (online live video)**: "
+                f"`{'available' if WEBRTC_OK else WEBRTC_ERR}`")
 
 if cv_utils.MEDIAPIPE_AVAILABLE and not cv_utils.model_present():
     st.info(
@@ -91,11 +102,58 @@ def analyse_still(data, prefer):
         st.caption("Try a front-facing photo with even lighting and nothing covering the face.")
 
 
-# On the cloud the live tab is replaced by a message, so Snapshot comes first there.
-if ON_CLOUD:
-    tab_snap, tab_upload, tab_live = st.tabs(["📸 Snapshot", "🖼️ Upload a photo", "🎥 Live camera"])
-else:
-    tab_live, tab_snap, tab_upload = st.tabs(["🎥 Live camera", "📸 Snapshot", "🖼️ Upload a photo"])
+# ------------------------------------------------------------------ browser live video (online)
+if WEBRTC_OK:
+
+    class FaceProcessor(VideoProcessorBase):
+        """Runs face detection on every frame sent by the visitor's browser camera."""
+
+        def __init__(self):
+            self.prefer = "auto"
+            self.show_mesh = False
+            self.error = None
+            self._engine = None
+            self._key = None
+            self._lock = threading.Lock()
+
+        def _ensure_engine(self):
+            if self._engine is None or self._key != self.prefer:
+                if self._engine is not None:
+                    try:
+                        self._engine.close()
+                    except Exception:
+                        pass
+                self._engine = cv_utils.create_engine(self.prefer, video_mode=True)[0]
+                self._key = self.prefer
+
+        def recv(self, frame):
+            img = frame.to_ndarray(format="bgr24")
+            img = cv_utils.cv2.flip(img, 1)  # mirror view
+            # keep it fast on the free server
+            if img.shape[1] > 640:
+                scale = 640 / img.shape[1]
+                img = cv_utils.cv2.resize(img, (640, int(img.shape[0] * scale)))
+            out = img
+            with self._lock:
+                try:
+                    self._ensure_engine()
+                    self._engine.show_mesh = self.show_mesh
+                    out, _info = self._engine.process(img)
+                    self.error = None
+                except Exception as exc:
+                    self.error = str(exc)
+                    out = img
+            return av.VideoFrame.from_ndarray(out, format="bgr24")
+
+
+RTC_CONFIG = {
+    "iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": ["stun:stun1.l.google.com:19302"]},
+    ]
+}
+
+tab_live, tab_snap, tab_upload = st.tabs(["🎥 Live camera", "📸 Snapshot", "🖼️ Upload a photo"])
 
 # ------------------------------------------------------------------ LIVE CAMERA
 with tab_live:
@@ -103,13 +161,47 @@ with tab_live:
     ss.setdefault("cv_running", False)
 
     if ON_CLOUD:
-        # The server has no webcam, so never try to open one here.
+        # Online: the video comes from the visitor's browser, never from the server.
         release_camera_resources()
-        st.info(
-            "📌 The live webcam works only when the app runs on your own computer, because it reads "
-            "the camera of the machine running the code. In this online version, please use the "
-            "**📸 Snapshot** tab (your browser camera) or the **🖼️ Upload a photo** tab."
-        )
+        if not WEBRTC_OK:
+            st.error(
+                "Live video needs the `streamlit-webrtc` package, which could not be loaded.\n\n"
+                f"Details: `{WEBRTC_ERR}`\n\n"
+                "Add `streamlit-webrtc>=0.60` to `requirements313.txt`, push to GitHub and reboot. "
+                "Meanwhile, use the **📸 Snapshot** or **🖼️ Upload a photo** tab."
+            )
+        else:
+            st.write("Live face detection using **your browser camera**. Video is processed in memory "
+                     "and is not saved. Press **START** and allow camera access when your browser asks.")
+            consent_cloud = st.checkbox(
+                "I understand why the camera is used and agree to turn it on for this demo.",
+                key="cv_consent_live_cloud")
+            if not consent_cloud:
+                st.info("Tick the box above to show the camera controls.")
+            else:
+                w1, w2 = st.columns(2)
+                backend_label = w1.selectbox("Detector", list(BACKENDS), key="cv_backend_cloud")
+                show_mesh = w2.checkbox("Show full mesh", value=False, key="cv_mesh_cloud",
+                                        help="Draws every landmark connection (needs the MediaPipe model).")
+                ctx = webrtc_streamer(
+                    key="mentivara-live-face",
+                    mode=WebRtcMode.SENDRECV,
+                    rtc_configuration=RTC_CONFIG,
+                    video_processor_factory=FaceProcessor,
+                    media_stream_constraints={
+                        "video": {"width": {"ideal": 640}, "frameRate": {"ideal": 15}},
+                        "audio": False,
+                    },
+                    async_processing=True,
+                )
+                if ctx.video_processor:
+                    ctx.video_processor.prefer = BACKENDS[backend_label]
+                    ctx.video_processor.show_mesh = show_mesh
+                    if ctx.video_processor.error:
+                        st.warning(f"Face detector problem: {ctx.video_processor.error}")
+                st.caption("If the video never starts: allow the camera in your browser (lock icon next to "
+                           "the address), close other apps using the camera, and try another network. "
+                           "Some school or office networks block live video.")
     else:
         st.write("The camera stays **off** until you tick the box and press **Start camera**. "
                  "Press **Stop camera** or leave this page and it is released immediately.")
@@ -237,12 +329,12 @@ with tab_upload:
 with st.expander("How it works (for your presentation)"):
     st.markdown(
         "1. **Capture:** on a local computer, OpenCV reads frames from the webcam (`cv2.VideoCapture`). "
-        "In the online version, the browser camera (Snapshot) is used instead, because a cloud server "
-        "has no webcam.\n"
+        "In the online version, the visitor's browser camera sends live video to the app "
+        "(WebRTC via `streamlit-webrtc`), because a cloud server has no webcam.\n"
         "2. **Detect:** MediaPipe Face Landmarker finds faces and facial landmark points. If its model "
         "file is not installed, OpenCV's Haar cascade finds face boxes instead.\n"
         "3. **Draw:** bounding boxes, a label, and (with MediaPipe) the face contour mesh are drawn on the frame.\n"
-        "4. **Show:** the annotated image is displayed in Streamlit.\n\n"
+        "4. **Show:** the annotated video is sent back and displayed in the browser in real time.\n\n"
         "Detection only finds *where* a face is. It cannot tell who someone is, how they feel, or "
         "anything about their health."
     )
