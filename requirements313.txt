@@ -1,0 +1,13 @@
+# Mentivara AI - dependencies for Python 3.13 (also fine on 3.10-3.12)
+# Every package below publishes prebuilt Windows wheels, so no C compiler is needed.
+#
+# IMPORTANT: install exactly ONE OpenCV package. MediaPipe itself depends on
+# opencv-contrib-python, so do NOT also install opencv-python or opencv-python-headless.
+streamlit>=1.40
+numpy>=2.1
+pandas>=2.2
+scikit-learn>=1.5
+joblib>=1.3
+plotly>=5.18
+opencv-contrib-python>=4.10,<5
+mediapipe>=0.10.30
