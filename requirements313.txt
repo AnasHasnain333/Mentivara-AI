@@ -12,3 +12,4 @@ plotly>=5.18
 opencv-contrib-python>=4.10,<5
 mediapipe>=0.10.30
 streamlit-webrtc>=0.60
+av
