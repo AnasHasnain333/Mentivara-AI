@@ -12,4 +12,8 @@ plotly>=5.18
 opencv-contrib-python>=4.10,<5
 mediapipe>=0.10.30
 streamlit-webrtc>=0.60
+<<<<<<< HEAD
 av
+=======
+av
+>>>>>>> 4f9b9dda4e1bdd3e32e230fd02dd709b15504f61
