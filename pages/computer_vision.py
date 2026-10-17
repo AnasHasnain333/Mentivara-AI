@@ -2,6 +2,7 @@ import os
 import threading
 import time
 
+import numpy as np
 import streamlit as st
 
 from utils import cv_utils
@@ -130,15 +131,18 @@ if WEBRTC_OK:
             img = frame.to_ndarray(format="bgr24")
             img = cv_utils.cv2.flip(img, 1)  # mirror view
             # keep it fast on the free server
-            if img.shape[1] > 640:
-                scale = 640 / img.shape[1]
-                img = cv_utils.cv2.resize(img, (640, int(img.shape[0] * scale)))
+            if img.shape[1] > 480:
+                scale = 480 / img.shape[1]
+                img = cv_utils.cv2.resize(img, (480, int(img.shape[0] * scale)))
             out = img
             with self._lock:
                 try:
                     self._ensure_engine()
                     self._engine.show_mesh = self.show_mesh
                     out, _info = self._engine.process(img)
+                    if out is None:
+                        out = img
+                    out = np.ascontiguousarray(out, dtype=np.uint8)
                     self.error = None
                 except Exception as exc:
                     self.error = str(exc)
@@ -180,7 +184,8 @@ with tab_live:
                 st.info("Tick the box above to show the camera controls.")
             else:
                 w1, w2 = st.columns(2)
-                backend_label = w1.selectbox("Detector", list(BACKENDS), key="cv_backend_cloud")
+                backend_label = w1.selectbox("Detector", list(BACKENDS), index=2, key="cv_backend_cloud",
+                                             help="OpenCV boxes only is the fastest on the free server.")
                 show_mesh = w2.checkbox("Show full mesh", value=False, key="cv_mesh_cloud",
                                         help="Draws every landmark connection (needs the MediaPipe model).")
                 ctx = webrtc_streamer(
@@ -189,7 +194,7 @@ with tab_live:
                     rtc_configuration=RTC_CONFIG,
                     video_processor_factory=FaceProcessor,
                     media_stream_constraints={
-                        "video": {"width": {"ideal": 640}, "frameRate": {"ideal": 15}},
+                        "video": {"width": {"ideal": 480}, "frameRate": {"ideal": 10}},
                         "audio": False,
                     },
                     async_processing=True,
